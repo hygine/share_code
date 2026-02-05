@@ -1,0 +1,16 @@
+streamlit>=1.30
+pandas
+numpy
+scikit-learn
+scipy
+plotly
+matplotlib
+seaborn
+networkx
+statsmodels
+openpyxl
+rpy2
+upsetplot
+matplotlib-venn
+python-docx
+inmoose

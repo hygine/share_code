@@ -1,0 +1,230 @@
+# modules/pca.py
+from typing import Optional
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+import imageio
+import io
+
+from utils.pca_utils import confidence_ellipse, top_loadings
+
+
+def pca_block(df: pd.DataFrame, annotation_col: Optional[pd.DataFrame] = None):
+    st.subheader("🔭 主成分分析（PCA · 科研增强版）")
+
+    # =========================
+    # 数据准备
+    # =========================
+    X = df.T.apply(pd.to_numeric, errors="coerce").dropna(axis=1)
+    if X.shape[0] < 3 or X.shape[1] < 2:
+        st.warning("样本或特征数不足，无法进行 PCA")
+        return
+
+    # =========================
+    # 参数区
+    # =========================
+    dim = st.radio("维度", ["2D", "3D"], horizontal=True)
+    scale = st.checkbox("Z-score 标准化", value=True)
+    show_ellipse = st.checkbox("显示置信椭圆 (2D)", value=True)
+    show_biplot = st.checkbox("显示基因 loading (biplot)", value=False)
+    top_n = 15
+    if show_biplot:
+        top_n = st.slider("Top loading 基因数", 5, 50, 15)
+
+    color_by = None
+    if annotation_col is not None:
+        common = X.index.intersection(annotation_col.index)
+        if len(common) >= 3:
+            X = X.loc[common]
+            annotation_col = annotation_col.loc[common]
+            color_by = st.selectbox(
+                "按 annotation 分组",
+                [None] + annotation_col.columns.tolist()
+            )
+
+    # =========================
+    # PCA 计算
+    # =========================
+    X_scaled = StandardScaler().fit_transform(X) if scale else X.values
+    n_components = 3 if dim == "3D" else 2
+    pca = PCA(n_components=n_components)
+    pcs = pca.fit_transform(X_scaled)
+    exp_var = pca.explained_variance_ratio_
+
+    pca_df = pd.DataFrame(
+        pcs,
+        index=X.index,
+        columns=[f"PC{i+1}" for i in range(n_components)]
+    )
+    if color_by:
+        pca_df[color_by] = annotation_col[color_by]
+
+    # =========================
+    # 绘图
+    # =========================
+    if dim == "3D":
+        fig = go.Figure()
+        groups = pca_df.groupby(color_by) if color_by else [(None, pca_df)]
+        colors = px.colors.qualitative.Dark24
+        color_map = {}
+
+        for i, (name, group) in enumerate(groups):
+            color_map[name] = colors[i % len(colors)]
+            fig.add_trace(go.Scatter3d(
+                x=group["PC1"],
+                y=group["PC2"],
+                z=group["PC3"],
+                mode="markers",
+                name=str(name),
+                marker=dict(
+                    size=6,
+                    color=color_map[name],
+                    line=dict(width=0.5, color="black")
+                ),
+                text=group.index,
+                hovertemplate="<b>%{text}</b><br>PC1=%{x:.2f}<br>PC2=%{y:.2f}<br>PC3=%{z:.2f}"
+            ))
+
+        # 自动旋转动画
+        rotate = st.checkbox("🔄 开启自动旋转 3D PCA", value=False)
+        if rotate:
+            frames = []
+            n_frames = 60  # 帧数，可调
+            r = 1.25
+            z_eye = 0.8
+            for i in range(n_frames):
+                angle = 2 * np.pi * i / n_frames
+                eye = dict(x=r * np.cos(angle), y=r * np.sin(angle), z=z_eye)
+                frames.append(go.Frame(layout=dict(scene_camera=dict(eye=eye))))
+            fig.frames = frames
+            fig.update_layout(
+                scene=dict(
+                    xaxis_title=f"PC1 ({exp_var[0]*100:.1f}%)",
+                    yaxis_title=f"PC2 ({exp_var[1]*100:.1f}%)",
+                    zaxis_title=f"PC3 ({exp_var[2]*100:.1f}%)"
+                ),
+                template="simple_white",
+                title="3D PCA Analysis",
+                updatemenus=[dict(
+                    type="buttons",
+                    showactive=False,
+                    buttons=[dict(label="Play",
+                                  method="animate",
+                                  args=[None, dict(frame=dict(duration=50, redraw=True),
+                                                   fromcurrent=True,
+                                                   transition=dict(duration=0),
+                                                   loop=True)])]
+                )]
+            )
+        else:
+            fig.update_layout(
+                scene=dict(
+                    xaxis_title=f"PC1 ({exp_var[0]*100:.1f}%)",
+                    yaxis_title=f"PC2 ({exp_var[1]*100:.1f}%)",
+                    zaxis_title=f"PC3 ({exp_var[2]*100:.1f}%)",
+                    camera=dict(eye=dict(x=1.25, y=1.25, z=0.8))
+                ),
+                template="simple_white",
+                title="3D PCA Analysis"
+            )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # GIF 动画导出
+        generate_gif = st.checkbox("🎞 导出 3D PCA GIF 动画", value=False)
+        if generate_gif:
+            st.info("生成 GIF 可能需要几秒钟，请耐心等待...")
+            n_gif_frames = st.slider("GIF 帧数", 20, 120, 60)
+            r = 1.25
+            z_eye = 0.8
+            images = []
+            for i in range(n_gif_frames):
+                angle = 2 * np.pi * i / n_gif_frames
+                fig.update_layout(scene_camera=dict(eye=dict(x=r*np.cos(angle), y=r*np.sin(angle), z=z_eye)))
+                img_bytes = fig.to_image(format="png", width=800, height=600)
+                images.append(imageio.v2.imread(io.BytesIO(img_bytes)))
+            gif_bytes_io = io.BytesIO()
+            imageio.mimsave(gif_bytes_io, images, format='GIF', duration=0.05)
+            gif_bytes_io.seek(0)
+            st.download_button(
+                "📥 下载 3D PCA GIF 动画",
+                gif_bytes_io,
+                "pca_3d_animation.gif",
+                mime="image/gif"
+            )
+
+    else:
+        # 2D PCA 绘图
+        fig = go.Figure()
+        for name, group in pca_df.groupby(color_by) if color_by else [(None, pca_df)]:
+            fig.add_trace(go.Scatter(
+                x=group["PC1"],
+                y=group["PC2"],
+                mode="markers",
+                name=str(name),
+                marker=dict(size=9, line=dict(width=0.5, color="black")),
+                text=group.index,
+                hovertemplate="<b>%{text}</b><br>PC1=%{x:.2f}<br>PC2=%{y:.2f}"
+            ))
+            if show_ellipse and len(group) >= 3:
+                ex, ey = confidence_ellipse(group["PC1"], group["PC2"])
+                fig.add_trace(go.Scatter(
+                    x=ex, y=ey,
+                    mode="lines",
+                    line=dict(width=2),
+                    showlegend=False
+                ))
+
+        if show_biplot:
+            loading_df = top_loadings(pca, X.columns, top_n=top_n)
+            scale_factor = max(pca_df["PC1"].std(), pca_df["PC2"].std()) * 2
+            for gene, row in loading_df.iterrows():
+                fig.add_trace(go.Scatter(
+                    x=[0, row["PC1"]*scale_factor],
+                    y=[0, row["PC2"]*scale_factor],
+                    mode="lines+text",
+                    text=[None, gene],
+                    textposition="top center",
+                    line=dict(color="gray"),
+                    showlegend=False
+                ))
+
+        fig.update_layout(
+            template="simple_white",
+            title=(
+                "PCA Analysis<br><sup>"
+                f"PC1 {exp_var[0]*100:.1f}% | PC2 {exp_var[1]*100:.1f}%"
+                "</sup>"
+            ),
+            xaxis_title=f"PC1 ({exp_var[0]*100:.1f}%)",
+            yaxis_title=f"PC2 ({exp_var[1]*100:.1f}%)"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # =========================
+    # 导出 CSV
+    # =========================
+    st.download_button(
+        "📥 下载 PCA 坐标",
+        pca_df.to_csv().encode(),
+        "pca_coordinates.csv"
+    )
+    if dim == "2D" and show_biplot:
+        st.download_button(
+            "📥 下载 PCA loading",
+            loading_df.to_csv().encode(),
+            "pca_loadings.csv"
+        )
+
+    # =========================
+    # 图片下载 PNG
+    # =========================
+    st.download_button(
+        "📥 下载图片 (PNG)",
+        fig.to_image(format="png", width=1200, height=800),
+        "pca_plot.png"
+    )
